@@ -144,8 +144,12 @@ const Index = () => {
         <div className="grid lg:grid-cols-3 gap-6">
           {/* Left Column - Time Configuration */}
           <div className="lg:col-span-2 space-y-6">
-            <Tabs defaultValue="hunts" className="w-full">
+            <Tabs defaultValue="artifacts" className="w-full">
               <TabsList className="grid w-full grid-cols-3 bg-secondary/50">
+                <TabsTrigger value="artifacts" className="flex items-center gap-2">
+                  <FolderArchive className="w-4 h-4" />
+                  Artifacts
+                </TabsTrigger>
                 <TabsTrigger value="hunts" className="flex items-center gap-2">
                   <Target className="w-4 h-4" />
                   Hunts
@@ -153,10 +157,6 @@ const Index = () => {
                 <TabsTrigger value="tests" className="flex items-center gap-2">
                   <FlaskConical className="w-4 h-4" />
                   Tests
-                </TabsTrigger>
-                <TabsTrigger value="artifacts" className="flex items-center gap-2">
-                  <FolderArchive className="w-4 h-4" />
-                  Artifacts
                 </TabsTrigger>
               </TabsList>
 
