@@ -167,8 +167,11 @@
           <div class="tab-content active" id="tab-artifacts">
             <div class="panel">
               <label>Artifacts Start Date</label>
-              <input type="date" id="artifactDate">
-              <p style="font-size:0.75rem;color:var(--muted);margin-top:0.5rem;">Starting point for Artifact folders</p>
+              <input type="datetime-local" id="artifactStart">
+              <p style="font-size:0.75rem;color:var(--muted);margin-top:0.5rem;">Start time for all URLs in the Artifacts folder</p>
+              <label style="margin-top:1rem;">Artifacts End Date</label>
+              <input type="datetime-local" id="artifactEnd">
+              <p style="font-size:0.75rem;color:var(--muted);margin-top:0.5rem;">End time for all URLs in the Artifacts folder</p>
             </div>
           </div>
 
@@ -259,8 +262,8 @@
     let updatedContent = '';
 
     // Initialize
-    for (let i = 1; i <= 7; i++) hunts[`Hunt${i}`] = { start: '', end: '' };
-    for (let i = 1; i <= 2; i++) tests[`Test${i}`] = { start: '', end: '' };
+    for (let i = 1; i <= 7; i++) hunts[`Hunt ${i}`] = { start: '', end: '' };
+    for (let i = 1; i <= 2; i++) tests[`Test ${i}`] = { start: '', end: '' };
 
     // Generate time range inputs
     function createTimeRangeHtml(label, key, config, index) {
@@ -290,8 +293,8 @@
       `;
     }
 
-    document.getElementById('huntsGrid').innerHTML = Object.keys(hunts).map((k, i) => createTimeRangeHtml(`Hunt ${i + 1}`, k, 'hunts', i)).join('');
-    document.getElementById('testsGrid').innerHTML = Object.keys(tests).map((k, i) => createTimeRangeHtml(`Test ${i + 1}`, k, 'tests', i)).join('');
+    document.getElementById('huntsGrid').innerHTML = Object.keys(hunts).map((k, i) => createTimeRangeHtml(k, k, 'hunts', i)).join('');
+    document.getElementById('testsGrid').innerHTML = Object.keys(tests).map((k, i) => createTimeRangeHtml(k, k, 'tests', i)).join('');
 
     // Config update
     function updateConfig(el) {
@@ -335,6 +338,7 @@
     // Utils
     const dateToUnix = (d) => Math.floor(new Date(d).getTime() / 1000);
     const dateToISO = (d) => new Date(d).toISOString();
+    
     const detectType = (url) => {
       if (url.includes('startTime=') && url.includes('stopTime=')) return 'arkime';
       if (url.includes("from:'") && url.includes("to:'")) return 'kibana';
@@ -342,11 +346,19 @@
     };
 
     function updateArkimeUrl(url, start, end) {
-      return url.replace(/stopTime=\d+/g, `stopTime=${dateToUnix(end)}`).replace(/startTime=\d+/g, `startTime=${dateToUnix(start)}`);
+      const startUnix = dateToUnix(start);
+      const endUnix = dateToUnix(end);
+      return url
+        .replace(/startTime=\d+/g, `startTime=${startUnix}`)
+        .replace(/stopTime=\d+/g, `stopTime=${endUnix}`);
     }
 
     function updateKibanaUrl(url, start, end) {
-      return url.replace(/from:'[^']+'/g, `from:'${dateToISO(start)}'`).replace(/to:'[^']+'/g, `to:'${dateToISO(end)}'`);
+      const startISO = dateToISO(start);
+      const endISO = dateToISO(end);
+      return url
+        .replace(/from:'[^']+'/g, `from:'${startISO}'`)
+        .replace(/to:'[^']+'/g, `to:'${endISO}'`);
     }
 
     function extractUrls(content) {
@@ -375,7 +387,7 @@
         return;
       }
 
-      list.innerHTML = urls.map((item, i) => `
+      list.innerHTML = urls.slice(0, 50).map((item, i) => `
         <div class="preview-item" style="animation-delay:${i * 30}ms">
           <div class="preview-icon ${item.type}">
             ${item.type === 'arkime' 
@@ -396,32 +408,147 @@
       `).join('');
     }
 
+    // Find folder sections in bookmark HTML
+    function findFolderContent(content, folderName) {
+      // Find the folder header - matches patterns like:
+      // <DT><H3 ...>Artifacts</H3>
+      // <DT><H3 ...>Hunt 1</H3>
+      // <DT><H3 ...>Test 1</H3>
+      const folderPattern = new RegExp(
+        `<DT><H3[^>]*>${escapeRegex(folderName)}</H3>\\s*<DL>`,
+        'i'
+      );
+      
+      const match = content.match(folderPattern);
+      if (!match) return null;
+      
+      const startIndex = match.index;
+      
+      // Find the matching closing </DL><p> by counting nested DL tags
+      let depth = 1;
+      let pos = startIndex + match[0].length;
+      let endIndex = -1;
+      
+      while (pos < content.length && depth > 0) {
+        const nextDL = content.indexOf('<DL>', pos);
+        const nextCloseDL = content.indexOf('</DL>', pos);
+        
+        if (nextCloseDL === -1) break;
+        
+        if (nextDL !== -1 && nextDL < nextCloseDL) {
+          depth++;
+          pos = nextDL + 4;
+        } else {
+          depth--;
+          if (depth === 0) {
+            endIndex = nextCloseDL + 5;
+            // Include the trailing <p> if present
+            if (content.substring(endIndex, endIndex + 3) === '<p>') {
+              endIndex += 3;
+            }
+          }
+          pos = nextCloseDL + 5;
+        }
+      }
+      
+      if (endIndex === -1) return null;
+      
+      return {
+        start: startIndex,
+        end: endIndex,
+        content: content.substring(startIndex, endIndex)
+      };
+    }
+
+    function escapeRegex(string) {
+      return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    // Update all URLs within a section of content
+    function updateUrlsInSection(sectionContent, startTime, endTime) {
+      if (!startTime || !endTime) return sectionContent;
+      
+      // Update Arkime URLs
+      let updated = sectionContent.replace(
+        /(<A[^>]*HREF=")([^"]*startTime=\d+[^"]*)(")/gi,
+        (match, pre, url, post) => {
+          if (detectType(url) === 'arkime') {
+            return pre + updateArkimeUrl(url, startTime, endTime) + post;
+          }
+          return match;
+        }
+      );
+      
+      // Update Kibana URLs
+      updated = updated.replace(
+        /(<A[^>]*HREF=")([^"]*from:'[^']+[^"]*)(")/gi,
+        (match, pre, url, post) => {
+          if (detectType(url) === 'kibana') {
+            return pre + updateKibanaUrl(url, startTime, endTime) + post;
+          }
+          return match;
+        }
+      );
+      
+      return updated;
+    }
+
     // Update bookmarks
     function updateBookmarks() {
-      const content = document.getElementById('bookmarkContent').value;
-      if (!content) { showToast('No content', 'Upload a bookmarks file first'); return; }
+      let content = document.getElementById('bookmarkContent').value;
+      if (!content) { 
+        showToast('No content', 'Upload a bookmarks file first'); 
+        return; 
+      }
 
       let updated = content;
-      const processConfig = (config, prefix) => {
-        Object.entries(config).forEach(([key, range]) => {
-          if (!range.start || !range.end) return;
-          const num = key.replace(prefix, '');
-          const regex = new RegExp(`(${prefix}\\s*${num}[^<]*<A[^>]*HREF=")([^"]+)`, 'gi');
-          updated = updated.replace(regex, (_, pre, url) => {
-            const type = detectType(url);
-            if (type === 'arkime') return pre + updateArkimeUrl(url, range.start, range.end);
-            if (type === 'kibana') return pre + updateKibanaUrl(url, range.start, range.end);
-            return pre + url;
-          });
-        });
-      };
+      let updateCount = 0;
 
-      processConfig(hunts, 'Hunt');
-      processConfig(tests, 'Test');
+      // Update Artifacts folder
+      const artifactStart = document.getElementById('artifactStart').value;
+      const artifactEnd = document.getElementById('artifactEnd').value;
+      
+      if (artifactStart && artifactEnd) {
+        const artifactsFolder = findFolderContent(updated, 'Artifacts');
+        if (artifactsFolder) {
+          const updatedSection = updateUrlsInSection(artifactsFolder.content, artifactStart, artifactEnd);
+          updated = updated.substring(0, artifactsFolder.start) + updatedSection + updated.substring(artifactsFolder.end);
+          updateCount++;
+        }
+      }
+
+      // Update Hunt folders
+      Object.entries(hunts).forEach(([folderName, range]) => {
+        if (!range.start || !range.end) return;
+        
+        const folder = findFolderContent(updated, folderName);
+        if (folder) {
+          const updatedSection = updateUrlsInSection(folder.content, range.start, range.end);
+          updated = updated.substring(0, folder.start) + updatedSection + updated.substring(folder.end);
+          updateCount++;
+        }
+      });
+
+      // Update Test folders
+      Object.entries(tests).forEach(([folderName, range]) => {
+        if (!range.start || !range.end) return;
+        
+        const folder = findFolderContent(updated, folderName);
+        if (folder) {
+          const updatedSection = updateUrlsInSection(folder.content, range.start, range.end);
+          updated = updated.substring(0, folder.start) + updatedSection + updated.substring(folder.end);
+          updateCount++;
+        }
+      });
+      
+      if (updateCount === 0) {
+        showToast('No updates', 'Configure time ranges and ensure folder names match');
+        return;
+      }
       
       updatedContent = updated;
       document.getElementById('downloadBtn').disabled = false;
-      showToast('Updated', 'Timestamps updated successfully');
+      showToast('Updated', `${updateCount} folder(s) updated successfully`);
       updatePreview();
     }
 
